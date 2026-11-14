@@ -147,6 +147,9 @@ pub fn update_position(player: &Arc<Player>) {
             sender.enqueue_chunk(*pos);
         }
     }
+    world
+        .entity_tracker
+        .unpair_decor_chunks(player, &unloading_chunks);
     player.watched_section.store(new_cylindrical);
 
     // Make sure the watched section and the chunk watcher updates are async atomic. We want to

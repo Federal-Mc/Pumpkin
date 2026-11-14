@@ -26,6 +26,7 @@ use tracing::{debug, error, info, trace, warn};
 mod active_chunks;
 pub mod brightness;
 pub mod chunker;
+mod decor_store;
 mod entity_index;
 pub(crate) use entity_index::EntityIndex;
 pub mod cat_spawner;
@@ -650,7 +651,8 @@ impl World {
     }
 
     pub async fn shutdown(&self) {
-        let entities = self.entities.load_full();
+        let mut entities = self.entities.load_full().to_vec();
+        entities.extend(self.entity_tracker.decor_entities());
         self.save_entities_by_chunk(&entities, self.level.live_entity_chunk_positions())
             .await;
 
@@ -4863,7 +4865,7 @@ impl World {
                 return Some(player.clone() as Arc<dyn EntityBase>);
             }
         }
-        None
+        self.entity_tracker.get_decor(id)
     }
 
     /// Gets a `Player` by a username
@@ -5573,6 +5575,11 @@ impl World {
     #[expect(clippy::needless_pass_by_value)]
     pub fn add_entity_silent(&self, entity: Arc<dyn EntityBase>) {
         let base_entity = entity.get_entity();
+        if base_entity.is_decor_frozen() && entity.get_player().is_none() {
+            self.entity_tracker
+                .add_decor(&entity, saved_chunk_pos(entity.as_ref()), self);
+            return;
+        }
 
         // Guard against duplicate entities with the same UUID.
         // This can happen when chunk entity data is loaded while the entity
@@ -5628,6 +5635,13 @@ impl World {
         for passenger in passengers {
             base_entity.remove_passenger(passenger.get_entity().entity_id);
         }
+        if base_entity.is_decor_frozen()
+            && self
+                .entity_tracker
+                .remove_decor(base_entity.entity_id, self)
+        {
+            return;
+        }
 
         self.spawn_state.load().remove_entity(self, entity);
         self.entity_tracker.remove_entity(entity, self);
@@ -5665,6 +5679,7 @@ impl World {
             });
             new_entities
         });
+        entities_to_remove.extend(self.entity_tracker.take_decor_chunks(&chunks_set, self));
 
         self.save_entities_by_chunk(&entities_to_remove, chunks_set.iter().copied())
             .await;
@@ -5679,7 +5694,9 @@ impl World {
                 base.removed.store(true, Ordering::Release);
             }
             self.entity_tracker.remove_entity(entity.as_ref(), self);
-            self.spawn_state.load().remove_entity(self, entity.as_ref());
+            if !base.is_decor_frozen() {
+                self.spawn_state.load().remove_entity(self, entity.as_ref());
+            }
             if let Some(mob) = entity.get_mob() {
                 mob.get_mob_entity().finish_removal(mob);
             }
@@ -7070,6 +7087,23 @@ impl World {
 
     pub fn set_static_decor(&self, enabled: bool) {
         self.static_decor.store(enabled, Ordering::Release);
+        if enabled {
+            return;
+        }
+        let thawed = self.entity_tracker.thaw_decor();
+        if thawed.is_empty() {
+            return;
+        }
+        let spawn_state = self.spawn_state.load();
+        for entity in &thawed {
+            entity.get_entity().thaw_decor();
+            spawn_state.add_entity(self, entity.as_ref());
+        }
+        self.entities.rcu(|current_entities| {
+            let mut new_entities = (**current_entities).clone();
+            new_entities.extend(thawed.iter().cloned());
+            new_entities
+        });
     }
 
     pub fn is_static_decor(&self) -> bool {
@@ -7108,8 +7142,9 @@ impl World {
 
     pub fn chunk_entity_nbts(&self, chunk_pos: Vector2<i32>) -> Vec<NbtCompound> {
         let entities = self.entities.load();
+        let decor = self.entity_tracker.decor_in_chunks(&[chunk_pos]);
         let mut out = Vec::new();
-        for entity in entities.iter() {
+        for entity in entities.iter().chain(&decor) {
             if entity.get_entity().is_removed()
                 || entity.get_player().is_some()
                 || saved_chunk_pos(entity.as_ref()) != chunk_pos
@@ -7785,7 +7820,8 @@ impl World {
     }
 
     pub async fn save(&self) {
-        let entities = self.entities.load_full();
+        let mut entities = self.entities.load_full().to_vec();
+        entities.extend(self.entity_tracker.decor_entities());
         self.save_entities_by_chunk(&entities, self.level.live_entity_chunk_positions())
             .await;
 

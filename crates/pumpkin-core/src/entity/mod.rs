@@ -2179,6 +2179,10 @@ impl Entity {
         self.decor_frozen.store(true, Ordering::Relaxed);
     }
 
+    pub fn thaw_decor(&self) {
+        self.decor_frozen.store(false, Ordering::Relaxed);
+    }
+
     #[must_use]
     pub fn is_decor_frozen(&self) -> bool {
         self.decor_frozen.load(Ordering::Relaxed)

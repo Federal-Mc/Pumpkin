@@ -42,6 +42,7 @@ use crate::net::ClientPlatform;
 use crate::net::java::JavaClient;
 use crate::world::World;
 use crate::world::chunker::get_view_distance;
+use crate::world::decor_store::DecorStore;
 
 /// Vanilla `VecDeltaCodec.encode`: Java `Math.round` on the 1/4096
 fn encode_pos(value: f64) -> i64 {
@@ -485,28 +486,52 @@ impl TrackedEntity {
                 .is_chunk_ready(&entity_chunk);
 
         if is_visible {
-            if self
-                .seen_by
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .contains_key(&player.gameprofile.id)
-            {
-                return;
-            }
-            let inserted = self
-                .seen_by
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(player.gameprofile.id, player.clone())
-                .is_none();
-            if inserted {
-                if matches!(player.client.as_ref(), ClientPlatform::Bedrock(_)) {
-                    self.bedrock_watchers.fetch_add(1, Relaxed);
-                }
-                self.add_pairing(player);
-            }
+            self.pair(player);
         } else {
             self.remove_player(player);
+        }
+    }
+
+    fn pair(&self, player: &Arc<Player>) {
+        if self
+            .seen_by
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(&player.gameprofile.id)
+        {
+            return;
+        }
+        let inserted = self
+            .seen_by
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(player.gameprofile.id, player.clone())
+            .is_none();
+        if inserted {
+            if matches!(player.client.as_ref(), ClientPlatform::Bedrock(_)) {
+                self.bedrock_watchers.fetch_add(1, Relaxed);
+            }
+            self.add_pairing(player);
+        }
+    }
+
+    fn pair_decor(&self, player: &Arc<Player>) {
+        if self.tracking_range == 0 || player.get_entity().entity_id == self.entity_id {
+            return;
+        }
+        let entity_chunk = self.entity.get_entity().chunk_pos.load();
+        let visible = player
+            .watched_section
+            .load()
+            .is_within_distance(entity_chunk.x, entity_chunk.y)
+            && self.broadcast_to_player(player)
+            && player
+                .chunk_sender
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_chunk_ready(&entity_chunk);
+        if visible {
+            self.pair(player);
         }
     }
 
@@ -1143,6 +1168,7 @@ pub struct EntityTracker {
     pub entity_map: DashMap<i32, Arc<TrackedEntity>>,
     map_version: AtomicU64,
     snapshot: std::sync::Mutex<(u64, Arc<[Arc<TrackedEntity>]>)>,
+    decor: DecorStore<Arc<TrackedEntity>>,
 }
 
 impl Default for EntityTracker {
@@ -1158,24 +1184,142 @@ impl EntityTracker {
             entity_map: DashMap::new(),
             map_version: AtomicU64::new(0),
             snapshot: std::sync::Mutex::new((u64::MAX, Arc::from(Vec::new()))),
+            decor: DecorStore::default(),
         }
     }
 
     #[must_use]
     pub fn get_tracked_entity(&self, entity_id: i32) -> Option<Arc<TrackedEntity>> {
-        self.entity_map.get(&entity_id).map(|r| r.value().clone())
+        self.entity_map
+            .get(&entity_id)
+            .map(|r| r.value().clone())
+            .or_else(|| self.decor.get(entity_id))
     }
 
     #[must_use]
     pub fn has_entity_with_id(&self, entity_id: i32) -> bool {
-        self.entity_map.contains_key(&entity_id)
+        self.entity_map.contains_key(&entity_id) || self.decor.get(entity_id).is_some()
     }
 
     #[must_use]
     pub fn is_tracked_by_any_player(&self, entity_id: i32) -> bool {
-        self.entity_map
-            .get(&entity_id)
+        self.get_tracked_entity(entity_id)
             .is_some_and(|t| t.has_viewers())
+    }
+
+    pub fn add_decor(
+        &self,
+        entity: &Arc<dyn EntityBase>,
+        chunk: Vector2<i32>,
+        world: &World,
+    ) -> bool {
+        let base = entity.get_entity();
+        let entity_type = base.entity_type;
+        let tracked = Arc::new(TrackedEntity::new(
+            entity.clone(),
+            entity_type.client_tracking_range,
+            entity_type.update_interval,
+            entity_type.track_deltas,
+        ));
+        if !self
+            .decor
+            .insert(chunk, base.entity_id, base.entity_uuid, tracked.clone())
+        {
+            return false;
+        }
+        for player in world.players.load().iter() {
+            tracked.pair_decor(player);
+        }
+        true
+    }
+
+    #[must_use]
+    pub fn decor_entities(&self) -> Vec<Arc<dyn EntityBase>> {
+        self.decor
+            .all()
+            .into_iter()
+            .map(|tracked| tracked.entity.clone())
+            .collect()
+    }
+
+    #[must_use]
+    pub fn decor_in_chunks(&self, chunks: &[Vector2<i32>]) -> Vec<Arc<dyn EntityBase>> {
+        self.decor
+            .in_chunks(chunks)
+            .into_iter()
+            .map(|tracked| tracked.entity.clone())
+            .collect()
+    }
+
+    #[must_use]
+    pub fn get_decor(&self, entity_id: i32) -> Option<Arc<dyn EntityBase>> {
+        self.decor
+            .get(entity_id)
+            .map(|tracked| tracked.entity.clone())
+    }
+
+    pub fn remove_decor(&self, entity_id: i32, world: &World) -> bool {
+        let Some(tracked) = self.decor.remove(entity_id) else {
+            return false;
+        };
+        tracked.broadcast_removed(world);
+        true
+    }
+
+    pub fn take_decor_chunks(
+        &self,
+        chunks: &FxHashSet<Vector2<i32>>,
+        world: &World,
+    ) -> Vec<Arc<dyn EntityBase>> {
+        self.decor
+            .take_chunks(chunks)
+            .into_iter()
+            .map(|tracked| {
+                tracked.broadcast_removed(world);
+                tracked.entity.clone()
+            })
+            .collect()
+    }
+
+    pub fn thaw_decor(&self) -> Vec<Arc<dyn EntityBase>> {
+        let thawed: Vec<_> = self
+            .decor
+            .take_all()
+            .into_iter()
+            .map(|tracked| {
+                let entity = tracked.entity.clone();
+                self.entity_map.insert(tracked.entity_id, tracked);
+                entity
+            })
+            .collect();
+        if !thawed.is_empty() {
+            self.map_version.fetch_add(1, Ordering::AcqRel);
+        }
+        thawed
+    }
+
+    pub fn unpair_decor_chunks(&self, player: &Player, chunks: &[Vector2<i32>]) {
+        Self::unpair_decor(player, self.decor.in_chunks(chunks));
+    }
+
+    fn unpair_decor(player: &Player, decor: Vec<Arc<TrackedEntity>>) {
+        let mut java_ids = Vec::new();
+        for tracked in decor {
+            if !tracked.is_seen_by(&player.gameprofile.id) {
+                continue;
+            }
+            tracked.forget_player(player);
+            match player.client.as_ref() {
+                ClientPlatform::Java(_) => java_ids.push(VarInt(tracked.entity_id)),
+                ClientPlatform::Bedrock(_) => tracked.remove_pairing(player),
+            }
+        }
+        if let ClientPlatform::Java(client) = player.client.as_ref()
+            && !java_ids.is_empty()
+            && let Ok(data) = client.serialize_packet(&CRemoveEntities::new(&java_ids))
+        {
+            client.try_enqueue_packet(data);
+        }
     }
 
     pub fn for_each_entity_tracked_by<F: FnMut(&Arc<dyn EntityBase>)>(
@@ -1221,6 +1365,9 @@ impl EntityTracker {
                 entry.value().update_player(player_arc, world);
             }
         }
+        for tracked in self.decor.all() {
+            tracked.pair_decor(player_arc);
+        }
     }
 
     /// Vanilla `PlayerList.respawn` -> viewers drop the dead entity, then spawn it fresh.
@@ -1240,6 +1387,10 @@ impl EntityTracker {
                 entry.value().forget_player(player);
                 entry.value().update_player(player, world);
             }
+        }
+        for tracked in self.decor.all() {
+            tracked.forget_player(player);
+            tracked.pair_decor(player);
         }
     }
 
@@ -1262,6 +1413,9 @@ impl EntityTracker {
                 entry.value().update_player(player, world);
             }
         }
+        for tracked in self.decor.in_chunks(&chunks) {
+            tracked.pair_decor(player);
+        }
     }
 
     pub fn remove_entity(&self, entity: &dyn EntityBase, world: &World) {
@@ -1270,6 +1424,7 @@ impl EntityTracker {
             for entry in &self.entity_map {
                 entry.value().remove_player(player);
             }
+            Self::unpair_decor(player, self.decor.all());
         }
 
         if let Some((_, tracked)) = self.entity_map.remove(&entity_id) {
