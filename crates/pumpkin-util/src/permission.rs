@@ -328,6 +328,14 @@ impl PermissionManager {
 
     /// Checks if a player has a specific permission.
     ///
+    /// Explicit attachments are read in this order, the first match deciding:
+    /// the exact node; `namespace:*`; then for each segment of the key, the
+    /// node up to it (so `ns:a` set to a value also decides `ns:a.b` and every
+    /// node below it) and the wildcard `ns:a.*`; the children of a registered
+    /// attached node; and last the global wildcard `*`, which only decides
+    /// nodes that nothing narrower decides. Without a match, the registered
+    /// default applies (unregistered nodes are denied).
+    ///
     /// # Parameters
     /// - `player_id`: The UUID of the player.
     /// - `permission_node`: The permission node string to check (e.g., "minecraft:command.gamemode").
@@ -387,6 +395,10 @@ impl PermissionManager {
                 {
                     return value && *child_val;
                 }
+            }
+
+            if let Some(value) = attachment.get("*") {
+                return *value;
             }
         }
 
@@ -459,5 +471,81 @@ impl<'de> Deserialize<'de> for PermissionLvl {
                 "Invalid value for OpLevel: {value}"
             ))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn manager() -> (PermissionManager, uuid::Uuid) {
+        let manager = PermissionManager::new();
+        for (node, default) in [
+            ("plugin:staff", PermissionDefault::Deny),
+            ("plugin:open", PermissionDefault::Allow),
+            ("plugin:admin", PermissionDefault::Op(PermissionLvl::Three)),
+        ] {
+            manager
+                .register_permission(Permission::new(node, "", default))
+                .unwrap();
+        }
+        (manager, uuid::Uuid::from_u128(1))
+    }
+
+    #[test]
+    fn global_wildcard_grants_registered_and_unregistered_nodes() {
+        let (manager, id) = manager();
+        assert!(!manager.has_permission(&id, "plugin:staff", PermissionLvl::Zero));
+        manager.set_permission(id, "*", true);
+        for node in [
+            "plugin:staff",
+            "plugin:admin",
+            "plugin:open",
+            "other:never.registered",
+        ] {
+            assert!(
+                manager.has_permission(&id, node, PermissionLvl::Zero),
+                "{node}"
+            );
+        }
+        manager
+            .register_permission(Permission::new("late:node", "", PermissionDefault::Deny))
+            .unwrap();
+        assert!(manager.has_permission(&id, "late:node", PermissionLvl::Zero));
+    }
+
+    #[test]
+    fn narrower_attachments_beat_the_global_wildcard() {
+        let (manager, id) = manager();
+        manager.set_permission(id, "*", true);
+        manager.set_permission(id, "plugin:staff", false);
+        manager.set_permission(id, "denied:*", false);
+        manager.set_permission(id, "tree:a.*", false);
+        assert!(!manager.has_permission(&id, "plugin:staff", PermissionLvl::Zero));
+        assert!(!manager.has_permission(&id, "denied:x", PermissionLvl::Zero));
+        assert!(!manager.has_permission(&id, "tree:a.b", PermissionLvl::Zero));
+        assert!(manager.has_permission(&id, "tree:b", PermissionLvl::Zero));
+        assert!(manager.has_permission(&id, "plugin:admin", PermissionLvl::Zero));
+    }
+
+    #[test]
+    fn global_wildcard_false_denies_defaults() {
+        let (manager, id) = manager();
+        manager.set_permission(id, "*", false);
+        manager.set_permission(id, "plugin:staff", true);
+        assert!(!manager.has_permission(&id, "plugin:open", PermissionLvl::Four));
+        assert!(!manager.has_permission(&id, "plugin:admin", PermissionLvl::Four));
+        assert!(manager.has_permission(&id, "plugin:staff", PermissionLvl::Zero));
+        manager.unset_permission(&id, "*");
+        assert!(manager.has_permission(&id, "plugin:open", PermissionLvl::Zero));
+    }
+
+    #[test]
+    fn true_node_still_decides_its_children() {
+        let (manager, id) = manager();
+        manager.set_permission(id, "plugin:alts", true);
+        assert!(manager.has_permission(&id, "plugin:alts.allow", PermissionLvl::Zero));
+        manager.set_permission(id, "plugin:alts.allow", false);
+        assert!(!manager.has_permission(&id, "plugin:alts.allow", PermissionLvl::Zero));
     }
 }
