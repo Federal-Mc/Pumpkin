@@ -25,7 +25,6 @@ rustls.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
 tracing.workspace = true
 console-subscriber = { workspace = true, optional = true }
-mimalloc = { version = "0.1", default-features = false }
 
 [features]
 console-subscriber = ["dep:console-subscriber"]
