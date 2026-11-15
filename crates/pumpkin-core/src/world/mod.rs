@@ -26,6 +26,7 @@ use tracing::{debug, error, info, trace, warn};
 
 const PLAYERS_PER_TASK: usize = 8;
 const LIGHT_ITEMS_PER_TASK: usize = 256;
+const PARTICLE_RANGE: f64 = 32.0;
 
 mod active_chunks;
 pub mod brightness;
@@ -1422,7 +1423,14 @@ impl World {
         particle: Particle,
     ) {
         for player in self.players.load().iter() {
-            player.spawn_particle(position, offset, max_speed, particle_count, particle);
+            let distance = player
+                .get_entity()
+                .pos
+                .load()
+                .squared_distance_to_vec(&position);
+            if distance <= PARTICLE_RANGE * PARTICLE_RANGE {
+                player.spawn_particle(position, offset, max_speed, particle_count, particle);
+            }
         }
     }
 
