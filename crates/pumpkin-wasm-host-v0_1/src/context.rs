@@ -1720,6 +1720,21 @@ impl pumpkin::plugin::context::HostContext for PluginHostState {
         Ok(context_res.register_permission(util_permission))
     }
 
+    fn set_packet_filter(
+        &mut self,
+        _context: Resource<WitContext>,
+        ids: Vec<i32>,
+    ) -> wasmtime::Result<()> {
+        let plugin = self
+            .plugin
+            .as_ref()
+            .ok_or_else(|| wasmtime::Error::msg("Plugin state uninitialized"))?
+            .upgrade()
+            .ok_or_else(|| wasmtime::Error::msg("Plugin has been dropped"))?;
+        plugin.declare_packet_ids(ids);
+        Ok(())
+    }
+
     fn get_data_folder(&mut self, _context: Resource<WitContext>) -> wasmtime::Result<String> {
         Ok("data".to_string())
     }

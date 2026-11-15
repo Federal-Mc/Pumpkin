@@ -39,6 +39,9 @@ interface context {
         /// * `blocking`: Whether the event should wait for this handler to finish.
         register-event: func(handler-id: u32, event-type: event-type, event-priority: event-priority, blocking: bool);
 
+        @since(version = 0.1.3)
+        set-packet-filter: func(ids: list<s32>);
+
         /// Registers a new command.
         ///
         /// * `command`: The command definition.

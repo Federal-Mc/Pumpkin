@@ -2,7 +2,7 @@ use pumpkin_core::plugin::api::events::server::packet::PacketReceivedEvent;
 use std::{
     any::Any,
     sync::{
-        Arc, OnceLock,
+        Arc, OnceLock, PoisonError, RwLock,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -241,6 +241,7 @@ pub struct WasmPlugin {
     pub fail_closed: OnceLock<String>,
     /// The `packet_ids` override: ids of the received packets this plugin's handlers get.
     pub packet_ids: OnceLock<Vec<i32>>,
+    pub declared_packet_ids: RwLock<Option<Vec<i32>>>,
     /// Set once the guest traps. Its instance is unusable afterwards, so the host stops calling it.
     pub trapped: AtomicBool,
 }
@@ -255,6 +256,15 @@ pub fn is_trap(error: &wasmtime::Error) -> bool {
 #[must_use]
 pub fn packet_filtered_out(packet_ids: Option<&[i32]>, packet_id: i32) -> bool {
     packet_ids.is_some_and(|ids| !ids.contains(&packet_id))
+}
+
+#[must_use]
+pub fn packet_skipped(
+    override_ids: Option<&[i32]>,
+    declared_ids: Option<&[i32]>,
+    packet_id: i32,
+) -> bool {
+    packet_filtered_out(override_ids.or(declared_ids), packet_id)
 }
 
 impl WasmPlugin {
@@ -273,9 +283,28 @@ impl WasmPlugin {
     pub fn skips_event(&self, event: &dyn Any) -> bool {
         event
             .downcast_ref::<PacketReceivedEvent>()
-            .is_some_and(|packet| {
-                packet_filtered_out(self.packet_ids.get().map(Vec::as_slice), packet.packet_id)
-            })
+            .is_some_and(|packet| self.skips_packet(packet.packet_id))
+    }
+
+    #[must_use]
+    pub fn skips_packet(&self, packet_id: i32) -> bool {
+        packet_skipped(
+            self.packet_ids.get().map(Vec::as_slice),
+            self.declared_packet_ids
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_deref(),
+            packet_id,
+        )
+    }
+
+    pub fn declare_packet_ids(&self, mut ids: Vec<i32>) {
+        ids.sort_unstable();
+        ids.dedup();
+        *self
+            .declared_packet_ids
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(ids);
     }
 
     /// The guest exports of this plugin. Each API version's host only ever sees plugins of its own version.
@@ -310,7 +339,7 @@ mod tests {
         ComponentBuilder, ComponentTypeRef, InstanceType, Module, ProducersField, ProducersSection,
     };
 
-    use super::{is_wasi_p3_import, packet_filtered_out, scan_component_names};
+    use super::{is_wasi_p3_import, packet_filtered_out, packet_skipped, scan_component_names};
 
     #[test]
     fn only_traps_count_as_trapped() {
@@ -326,6 +355,15 @@ mod tests {
         assert!(!packet_filtered_out(Some(&[19, 41, 46]), 41));
         assert!(packet_filtered_out(Some(&[19, 41, 46]), 7));
         assert!(packet_filtered_out(Some(&[]), 19));
+    }
+
+    #[test]
+    fn server_override_takes_precedence_over_declared_packet_ids() {
+        assert!(!packet_skipped(None, None, 7));
+        assert!(packet_skipped(None, Some(&[19, 46]), 7));
+        assert!(!packet_skipped(None, Some(&[19, 46]), 46));
+        assert!(!packet_skipped(Some(&[7]), Some(&[19, 46]), 7));
+        assert!(packet_skipped(Some(&[7]), Some(&[19, 46]), 46));
     }
 
     fn component_importing(names: &[&str]) -> Vec<u8> {

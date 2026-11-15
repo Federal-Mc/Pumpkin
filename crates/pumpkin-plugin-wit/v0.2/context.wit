@@ -41,6 +41,8 @@ interface context {
         ///   handler may suspend
         register-event: func(handler-id: u32, event-type: event-type, event-priority: event-priority, blocking: bool);
 
+        set-packet-filter: func(ids: list<s32>);
+
         /// Registers a new command.
         ///
         /// * `command`: The command definition.
