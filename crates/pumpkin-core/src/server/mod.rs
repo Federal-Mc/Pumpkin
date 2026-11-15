@@ -156,6 +156,7 @@ pub struct Server {
     /// Manages scheduled datapack functions (`/schedule`)
     pub scheduled_functions: Arc<crate::server::scheduler::ScheduledFunctionQueue>,
     tasks: TaskTracker,
+    unloading_worlds: Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<WorldUnloading>>>>,
     pub runtime: tokio::runtime::Handle,
     /// Dedicated Rayon thread pool for synchronous world and entity simulation (ticks).
     pub simulation_pool: Arc<rayon::ThreadPool>,
@@ -367,6 +368,7 @@ impl Server {
             tick_count: AtomicI32::new(0),
             debug_profiler: debug_profiler::DebugProfiler::new(),
             tasks: TaskTracker::new(),
+            unloading_worlds: Arc::default(),
             stop_token: crate::STOP_INTERRUPT.child_token(),
             admission_closed: std::sync::RwLock::new(false),
             runtime: tokio::runtime::Handle::current(),
@@ -521,6 +523,7 @@ impl Server {
     }
 
     pub fn create_world(self: &Arc<Self>, name: String, dimension: Dimension) -> Arc<World> {
+        self.wait_for_unload(&name);
         {
             let worlds = self.worlds.load();
             let world = worlds
@@ -577,7 +580,6 @@ impl Server {
             ));
         }
 
-        world_to_unload.shutdown().await;
         world_to_unload.unload().await;
 
         self.worlds.rcu(|w_list| {
@@ -586,7 +588,46 @@ impl Server {
             new_list
         });
 
+        let key = world_to_unload.get_world_name().to_string();
+        let unloading = Arc::new(WorldUnloading::default());
+        self.unloading_worlds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key.clone(), unloading.clone());
+        let registry = self.unloading_worlds.clone();
+        self.spawn_task(async move {
+            let started = std::time::Instant::now();
+            world_to_unload.shutdown().await;
+            drop(world_to_unload);
+            unloading.finish();
+            let mut registry = registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if registry
+                .get(&key)
+                .is_some_and(|current| Arc::ptr_eq(current, &unloading))
+            {
+                registry.remove(&key);
+            }
+            drop(registry);
+            debug!("World {key} saved and closed in {:?}", started.elapsed());
+        });
+
         Ok(())
+    }
+
+    fn wait_for_unload(&self, name: &str) {
+        let pending = self
+            .unloading_worlds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(name)
+            .cloned();
+        if let Some(pending) = pending
+            && !pending.wait(Duration::from_secs(3))
+        {
+            warn!("World {name} is still closing after 3 s; opening it again anyway");
+        }
     }
 
     pub fn save_world_info(&self) -> Result<(), WorldInfoError> {
@@ -1478,5 +1519,33 @@ impl Server {
                 plugin_name,
             );
         self.plugin_manager.fire(self, &mut disable_event).await;
+    }
+}
+
+#[derive(Default)]
+struct WorldUnloading {
+    done: std::sync::Mutex<bool>,
+    finished: std::sync::Condvar,
+}
+
+impl WorldUnloading {
+    fn finish(&self) {
+        *self
+            .done
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        self.finished.notify_all();
+    }
+
+    fn wait(&self, limit: std::time::Duration) -> bool {
+        let done = self
+            .done
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (done, _) = self
+            .finished
+            .wait_timeout_while(done, limit, |done| !*done)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *done
     }
 }
