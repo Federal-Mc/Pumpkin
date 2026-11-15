@@ -220,67 +220,73 @@ pub fn write_chunk_data(
             .lock()
             .map_err(|_| WritingError::Message("light_engine lock poisoned".into()))?;
         let num_sections = light_engine.sky_light.len();
+        let sky_sent = light_engine
+            .sky_light
+            .iter()
+            .rposition(|section| !is_filled(section, 0xFF))
+            .map_or(0, |top| top + 1);
+        let sky_kinds: Vec<LightKind> = light_engine
+            .sky_light
+            .iter()
+            .enumerate()
+            .map(|(index, section)| {
+                if index >= sky_sent {
+                    LightKind::Omitted
+                } else {
+                    LightKind::of(section)
+                }
+            })
+            .collect();
+        let block_kinds: Vec<LightKind> =
+            light_engine.block_light.iter().map(LightKind::of).collect();
 
-        let mut sky_light_empty_mask = 0u64;
-        let mut block_light_empty_mask = 0u64;
+        let mut sky_light_empty_mask = 1u64;
+        let mut block_light_empty_mask = 1u64;
         let mut sky_light_mask = 0u64;
         let mut block_light_mask = 0u64;
 
-        // Bit 0 represents the section below the world (always empty)
-        sky_light_empty_mask |= 1 << 0;
-        block_light_empty_mask |= 1 << 0;
-
-        // Bits 1..=num_sections represent the actual world sections
         for section_index in 0..num_sections {
-            let bit_index = section_index + 1; // Offset by 1 for the below-world section
-
-            if let LightContainer::Full(_) = &light_engine.sky_light[section_index] {
-                sky_light_mask |= 1 << bit_index;
-            } else {
-                sky_light_empty_mask |= 1 << bit_index;
+            let bit = 1u64 << (section_index + 1);
+            match sky_kinds[section_index] {
+                LightKind::Data => sky_light_mask |= bit,
+                LightKind::Empty => sky_light_empty_mask |= bit,
+                LightKind::Omitted => {}
             }
-
-            if let LightContainer::Full(_) = &light_engine.block_light[section_index] {
-                block_light_mask |= 1 << bit_index;
-            } else {
-                block_light_empty_mask |= 1 << bit_index;
+            match block_kinds[section_index] {
+                LightKind::Data => block_light_mask |= bit,
+                LightKind::Empty => block_light_empty_mask |= bit,
+                LightKind::Omitted => {}
             }
         }
 
-        // Bit num_sections+1 represents the section above the world (always empty)
-        sky_light_empty_mask |= 1 << (num_sections + 1);
+        if sky_sent == num_sections {
+            sky_light_empty_mask |= 1 << (num_sections + 1);
+        }
         block_light_empty_mask |= 1 << (num_sections + 1);
 
-        // Trust edges (1.18 - 1.19.4; removed in 1.20)
         if version < &JavaMinecraftVersion::V_1_20 {
             write.write_bool(true)?;
         }
 
-        // Write Sky Light Mask
         BitSet(Box::new([sky_light_mask as i64])).encode_with_version(&mut write, version)?;
-        // Write Block Light Mask
         BitSet(Box::new([block_light_mask as i64])).encode_with_version(&mut write, version)?;
-        // Write Empty Sky Light Mask
         BitSet(Box::new([sky_light_empty_mask as i64])).encode_with_version(&mut write, version)?;
-        // Write Empty Block Light Mask
         BitSet(Box::new([block_light_empty_mask as i64]))
             .encode_with_version(&mut write, version)?;
 
         let light_data_size: VarInt = VarInt(LightContainer::ARRAY_SIZE as i32);
 
-        // Write Sky Light arrays
         write.write_var_int(&VarInt(sky_light_mask.count_ones() as i32))?;
-        for section_index in 0..num_sections {
-            if let LightContainer::Full(data) = &light_engine.sky_light[section_index] {
+        for (section, kind) in light_engine.sky_light.iter().zip(&sky_kinds) {
+            if let (LightKind::Data, LightContainer::Full(data)) = (kind, section) {
                 write.write_var_int(&light_data_size)?;
                 write.write_slice(data.as_ref())?;
             }
         }
 
-        // Write Block Light arrays
         write.write_var_int(&VarInt(block_light_mask.count_ones() as i32))?;
-        for section_index in 0..num_sections {
-            if let LightContainer::Full(data) = &light_engine.block_light[section_index] {
+        for (section, kind) in light_engine.block_light.iter().zip(&block_kinds) {
+            if let (LightKind::Data, LightContainer::Full(data)) = (kind, section) {
                 write.write_var_int(&light_data_size)?;
                 write.write_slice(data.as_ref())?;
             }
@@ -288,4 +294,28 @@ pub fn write_chunk_data(
     }
 
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum LightKind {
+    Data,
+    Empty,
+    Omitted,
+}
+
+impl LightKind {
+    fn of(section: &LightContainer) -> Self {
+        if matches!(section, LightContainer::Full(_)) && !is_filled(section, 0) {
+            Self::Data
+        } else {
+            Self::Empty
+        }
+    }
+}
+
+fn is_filled(section: &LightContainer, byte: u8) -> bool {
+    match section {
+        LightContainer::Full(data) => data.iter().all(|&b| b == byte),
+        LightContainer::Empty(level) => *level << 4 | *level == byte,
+    }
 }
