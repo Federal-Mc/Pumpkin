@@ -157,13 +157,15 @@ pub async fn io_read_work(
                     }
                 }
                 LoadedData::Missing(pos) | LoadedData::Error((pos, _)) => {
+                    let world_gen = level.world_gen.load();
+                    if let Some(cache) = world_gen.global_structure_cache() {
+                        cache.ensure_strongholds_generated();
+                    }
                     if send
                         .send((
                             pos,
                             RecvChunk::IO(Chunk::Proto(Box::new(ProtoChunk::new(
-                                pos.x,
-                                pos.y,
-                                &level.world_gen.load(),
+                                pos.x, pos.y, &world_gen,
                             )))),
                         ))
                         .is_err()
