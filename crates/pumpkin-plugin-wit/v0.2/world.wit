@@ -991,6 +991,10 @@ interface %world {
         /// it again after loading the world, before its chunks generate.
         set-static-decor: func(enabled: bool);
 
+        set-view-distance: func(distance: option<u8>);
+
+        get-view-distance: func() -> option<u8>;
+
         /// Returns whether the map decoration of this world is static.
         is-static-decor: func() -> bool;
 

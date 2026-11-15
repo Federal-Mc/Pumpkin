@@ -3,7 +3,7 @@ use std::{num::NonZero, sync::Arc};
 
 use pumpkin_protocol::{
     bedrock::client::network_chunk_publisher_update::CNetworkChunkPublisherUpdate,
-    java::client::play::CCenterChunk,
+    java::client::play::{CCenterChunk, CSetChunkCacheRadius},
 };
 use pumpkin_world::cylindrical_chunk_iterator::Cylindrical;
 
@@ -14,18 +14,33 @@ use crate::{
 
 pub fn get_view_distance(player: &Player) -> NonZero<u8> {
     let fallback = NonZero::new(2).unwrap_or(NonZero::<u8>::MIN);
-    let Some(server) = player.world().server.upgrade() else {
-        return fallback;
-    };
-    let max_view_distance = match player.client.as_ref() {
-        ClientPlatform::Java(_) => server.advanced_config.networking.java.view_distance,
-        ClientPlatform::Bedrock(_) => server.advanced_config.networking.bedrock.view_distance,
-    };
     player
         .config
         .load()
         .view_distance
-        .clamp(fallback, max_view_distance)
+        .clamp(fallback, max_view_distance(player).max(fallback))
+}
+
+pub fn max_view_distance(player: &Player) -> NonZero<u8> {
+    let world = player.world();
+    let Some(server) = world.server.upgrade() else {
+        return NonZero::new(2).unwrap_or(NonZero::<u8>::MIN);
+    };
+    let server_max = match player.client.as_ref() {
+        ClientPlatform::Java(_) => server.advanced_config.networking.java.view_distance,
+        ClientPlatform::Bedrock(_) => server.advanced_config.networking.bedrock.view_distance,
+    };
+    world
+        .view_distance()
+        .map_or(server_max, |cap| cap.min(server_max))
+}
+
+pub fn send_view_distance(player: &Player) {
+    if let ClientPlatform::Java(java_client) = player.client.as_ref() {
+        java_client.try_send_packet(&CSetChunkCacheRadius::new(
+            i32::from(max_view_distance(player).get()).into(),
+        ));
+    }
 }
 
 // Checks if the target chunk is within Chebyshev distance (L_infinity) of the center chunk.

@@ -19,6 +19,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, RwLock, Weak};
 use std::{
     collections::{BTreeMap, HashMap},
+    num::NonZero,
     sync::atomic::Ordering,
 };
 use tracing::{debug, error, info, trace, warn};
@@ -299,6 +300,7 @@ pub struct World {
     /// Entity tracker responsible for tracking entity visibility and sending delta/status packets to watchers.
     pub entity_tracker: entity_tracker::EntityTracker,
     static_decor: std::sync::atomic::AtomicBool,
+    view_distance: std::sync::atomic::AtomicU8,
 }
 
 #[derive(Clone, Copy)]
@@ -458,6 +460,7 @@ impl World {
             custom_block_entity_data: DashMap::new(),
             entity_tracker: entity_tracker::EntityTracker::new(),
             static_decor: std::sync::atomic::AtomicBool::new(false),
+            view_distance: std::sync::atomic::AtomicU8::new(0),
         }
     }
 
@@ -4270,6 +4273,7 @@ impl World {
         }
 
         player.send_client_information();
+        chunker::send_view_distance(player);
         // The client just re-created the player entity (respawn or dimension change), so
         // it dropped its entity data; push it again or things like the second skin layer
         // stay hidden until the next change.
@@ -7083,6 +7087,22 @@ impl World {
                     }),
             )
             .collect()
+    }
+
+    #[must_use]
+    pub fn view_distance(&self) -> Option<NonZero<u8>> {
+        NonZero::new(self.view_distance.load(Ordering::Relaxed))
+    }
+
+    pub fn set_view_distance(&self, distance: Option<NonZero<u8>>) {
+        let new = distance.map_or(0, NonZero::get);
+        if self.view_distance.swap(new, Ordering::Relaxed) == new {
+            return;
+        }
+        for player in self.players.load().iter() {
+            chunker::send_view_distance(player);
+            chunker::update_position(player);
+        }
     }
 
     pub fn set_static_decor(&self, enabled: bool) {

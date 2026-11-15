@@ -1146,6 +1146,23 @@ impl pumpkin::plugin::world::HostWorld for PluginHostState {
         Ok(self.get(&world)?.is_static_decor())
     }
 
+    fn set_view_distance(
+        &mut self,
+        world: Resource<World>,
+        distance: Option<u8>,
+    ) -> wasmtime::Result<()> {
+        let distance = distance.and_then(|d| std::num::NonZero::new(d.clamp(2, 32)));
+        self.get(&world)?.set_view_distance(distance);
+        Ok(())
+    }
+
+    fn get_view_distance(&mut self, world: Resource<World>) -> wasmtime::Result<Option<u8>> {
+        Ok(self
+            .get(&world)?
+            .view_distance()
+            .map(std::num::NonZero::get))
+    }
+
     fn get_chunk_block_entities(
         &mut self,
         world: Resource<World>,

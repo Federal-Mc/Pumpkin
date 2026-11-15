@@ -945,6 +945,12 @@ interface %world {
         @since(version = 0.1.2)
         set-static-decor: func(enabled: bool);
 
+        @since(version = 0.1.4)
+        set-view-distance: func(distance: option<u8>);
+
+        @since(version = 0.1.4)
+        get-view-distance: func() -> option<u8>;
+
         /// Returns whether the map decoration of this world is static.
         @since(version = 0.1.2)
         is-static-decor: func() -> bool;
