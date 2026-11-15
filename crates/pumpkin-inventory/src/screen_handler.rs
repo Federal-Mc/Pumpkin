@@ -514,7 +514,7 @@ pub trait ScreenHandler: Send + Sync {
             let behaviour = self.get_behaviour_mut();
             let slot = behaviour.slots[i].clone();
             let stack = slot.get_cloned_stack();
-            self.update_tracked_slot(i, stack);
+            self.update_tracked_slot(i, &stack);
         }
 
         let behaviour = self.get_behaviour_mut();
@@ -564,10 +564,10 @@ pub trait ScreenHandler: Send + Sync {
     }
 
     /// Updates the tracked state of a slot.
-    fn update_tracked_slot(&mut self, slot: usize, stack: ItemStack) {
+    fn update_tracked_slot(&mut self, slot: usize, stack: &ItemStack) {
         let behaviour = self.get_behaviour_mut();
         let other_stack = &behaviour.tracked_stacks[slot];
-        if !other_stack.are_equal(&stack) {
+        if !other_stack.are_equal(stack) {
             behaviour.tracked_stacks[slot] = stack.clone();
 
             for listener in &behaviour.listeners {
@@ -577,16 +577,16 @@ pub trait ScreenHandler: Send + Sync {
     }
 
     /// Checks if a slot needs to be synced to the client.
-    fn check_slot_updates(&mut self, slot: usize, stack: ItemStack) {
+    fn check_slot_updates(&mut self, slot: usize, stack: &ItemStack) {
         let behaviour = self.get_behaviour_mut();
         if !behaviour.disable_sync {
             let prev_stack = &mut behaviour.previous_tracked_stacks[slot];
 
-            if !prev_stack.is_in_sync(&stack) {
+            if !prev_stack.is_in_sync(stack) {
                 prev_stack.set_received_stack(stack.clone());
                 let next_revision = behaviour.next_revision();
                 if let Some(sync_handler) = behaviour.sync_handler.as_ref() {
-                    sync_handler.update_slot(behaviour, slot, &stack, next_revision);
+                    sync_handler.update_slot(behaviour, slot, stack, next_revision);
                 }
             }
         }
@@ -619,8 +619,8 @@ pub trait ScreenHandler: Send + Sync {
             let slot = self.get_behaviour().slots[i].clone();
             let stack = slot.get_cloned_stack();
 
-            self.update_tracked_slot(i, stack.clone());
-            self.check_slot_updates(i, stack);
+            self.update_tracked_slot(i, &stack);
+            self.check_slot_updates(i, &stack);
         }
 
         self.check_cursor_stack_updates();
