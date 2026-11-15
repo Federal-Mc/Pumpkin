@@ -38,6 +38,9 @@ use pumpkin_util::text::{
 use pumpkin_wasm_host::WasmPluginLoader;
 use std::sync::Arc;
 use std::time::Instant;
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use tracing::{debug, info, warn};
 
 const CARGO_PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
