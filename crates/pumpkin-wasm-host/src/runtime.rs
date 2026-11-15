@@ -168,7 +168,7 @@ impl PluginRuntime {
         let engine = self.engine(api_version);
         let component = load_component(engine, &wasm_bytes, &self.cache_dir)?;
 
-        let (plugin_instance, store, metadata) = match api_version {
+        let (plugin_instance, typed_exports, store, metadata) = match api_version {
             PluginApiVersion::V0_1 => {
                 let instance_pre = self
                     .linker_v0_1
@@ -178,7 +178,7 @@ impl PluginRuntime {
                 let plugin_pre = pumpkin_wasm_host_v0_1::prepare_plugin(&instance_pre)
                     .map_err(PluginInitError::ApiMismatch)?;
 
-                let (plugin, store, metadata) = pumpkin_wasm_host_v0_1::init_plugin(
+                let (plugin, typed_exports, store, metadata) = pumpkin_wasm_host_v0_1::init_plugin(
                     engine,
                     plugin_pre,
                     &self.legacy_sync_reentry,
@@ -186,6 +186,7 @@ impl PluginRuntime {
                 .await?;
                 (
                     Arc::new(plugin) as Arc<dyn Any + Send + Sync>,
+                    Arc::new(typed_exports) as Arc<dyn Any + Send + Sync>,
                     store,
                     metadata,
                 )
@@ -200,7 +201,7 @@ impl PluginRuntime {
                 let plugin_pre = pumpkin_wasm_host_v0_2::prepare_plugin(&instance_pre)
                     .map_err(PluginInitError::ApiMismatch)?;
 
-                let (plugin, store, metadata) = pumpkin_wasm_host_v0_2::init_plugin(
+                let (plugin, typed_exports, store, metadata) = pumpkin_wasm_host_v0_2::init_plugin(
                     engine,
                     plugin_pre,
                     &self.legacy_sync_reentry,
@@ -208,6 +209,7 @@ impl PluginRuntime {
                 .await?;
                 (
                     Arc::new(plugin) as Arc<dyn Any + Send + Sync>,
+                    Arc::new(typed_exports) as Arc<dyn Any + Send + Sync>,
                     store,
                     metadata,
                 )
@@ -229,6 +231,7 @@ impl PluginRuntime {
         .map_err(PluginInitError::InstantiationFailed)?;
         let wasm_plugin = Arc::new(WasmPlugin {
             plugin_instance,
+            typed_exports,
             api_version,
             binding_language,
             store,
@@ -645,15 +648,15 @@ pub async fn handle_ipc_message(
     let message = message.to_owned();
     let function = match wasm_plugin.api_version {
         PluginApiVersion::V0_1 => {
-            *guest_exports::<pumpkin_wasm_host_v0_1::Plugin>(&wasm_plugin.plugin_instance)?
-                .func_handle_ipc_message()
-                .func()
+            wasm_plugin
+                .typed_exports::<pumpkin_wasm_host_v0_1::TypedExports>()?
+                .handle_ipc_message
         }
         #[cfg(feature = "v0_2")]
         PluginApiVersion::V0_2 => {
-            *guest_exports::<pumpkin_wasm_host_v0_2::Plugin>(&wasm_plugin.plugin_instance)?
-                .func_handle_ipc_message()
-                .func()
+            wasm_plugin
+                .typed_exports::<pumpkin_wasm_host_v0_2::TypedExports>()?
+                .handle_ipc_message
         }
         #[cfg(not(feature = "v0_2"))]
         PluginApiVersion::V0_2 => return Err(v0_2_disabled()),
@@ -664,10 +667,7 @@ pub async fn handle_ipc_message(
         .call_guest(move |mut context| {
             Box::pin(async move {
                 context
-                    .call_func::<(String, Vec<u8>), (Result<Vec<u8>, String>,)>(
-                        function,
-                        (sender, message),
-                    )
+                    .call(function, (sender, message))
                     .await
                     .map(|(result,)| result)
             })
@@ -894,5 +894,44 @@ mod tests {
             super::v0_2_api_version("0.2.0"),
             Err(super::PluginInitError::UnsupportedApiVersion(version)) if version.contains("plugin-v0_2")
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "set PUMPKIN_BENCH_PLUGIN to a v0.1 plugin component"]
+    #[allow(clippy::print_stderr)]
+    async fn typed_exports_skip_the_per_call_type_check() {
+        let Ok(plugin_path) = std::env::var("PUMPKIN_BENCH_PLUGIN") else {
+            return;
+        };
+        let rounds = 20_000u32;
+        let dir = tempfile::tempdir().unwrap();
+        let engine = super::new_engine(dir.path(), super::StoreMode::Sequential).unwrap();
+        let linker = super::setup_linker_v0_1(&engine).unwrap();
+        let bytes = std::fs::read(plugin_path).unwrap();
+        let component = super::load_component(&engine, &bytes, dir.path()).unwrap();
+        let instance_pre = linker.instantiate_pre(&component).unwrap();
+        let plugin_pre = pumpkin_wasm_host_v0_1::prepare_plugin(&instance_pre).unwrap();
+        let reentry = super::LegacySyncReentry::default();
+        let (plugin, exports, store, _) =
+            pumpkin_wasm_host_v0_1::init_plugin(&engine, plugin_pre, &reentry)
+                .await
+                .unwrap();
+        let func = *plugin.func_handle_event().func();
+
+        let start = std::time::Instant::now();
+        for _ in 0..rounds {
+            let typed: pumpkin_wasm_host_v0_1::HandleEventFunc = func.typed(&store).unwrap();
+            std::hint::black_box(typed);
+        }
+        let per_call = start.elapsed() / rounds;
+
+        let start = std::time::Instant::now();
+        for _ in 0..rounds {
+            std::hint::black_box(std::hint::black_box(&exports).handle_event);
+        }
+        let cached = start.elapsed() / rounds;
+
+        eprintln!("handle-event type check per call {per_call:?}, cached {cached:?}");
+        assert!(cached < per_call);
     }
 }

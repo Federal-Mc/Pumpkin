@@ -231,6 +231,7 @@ pub enum PluginApiVersion {
 pub struct WasmPlugin {
     /// The guest exports of the plugin, as generated for `api_version`.
     pub plugin_instance: Arc<dyn Any + Send + Sync>,
+    pub typed_exports: Arc<dyn Any + Send + Sync>,
     pub api_version: PluginApiVersion,
     pub binding_language: Option<String>,
     pub store: LegacyStore,
@@ -286,6 +287,14 @@ impl WasmPlugin {
         self.plugin_instance
             .downcast_ref()
             .unwrap_or_else(|| panic!("Unexpected plugin version in host path."))
+    }
+
+    /// # Errors
+    /// Returns an error when `T` is not the type defined for this plugin's API version.
+    pub fn typed_exports<T: 'static>(&self) -> wasmtime::Result<&T> {
+        self.typed_exports
+            .downcast_ref()
+            .ok_or_else(|| wasmtime::Error::msg("Plugin exports do not match its API version"))
     }
 }
 

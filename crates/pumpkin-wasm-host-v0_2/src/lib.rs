@@ -10,8 +10,8 @@ use pumpkin_core::plugin::PluginMetadata;
 use pumpkin_wasm_host_common::{
     concurrent_store::LegacySyncReentry, plugin::PluginInitError, state::PluginHostState,
 };
-use wasmtime::component::{Accessor, HasSelf, InstancePre, Linker, Resource};
-use wasmtime::{Engine, Store};
+use wasmtime::component::{Accessor, HasSelf, InstancePre, Linker, Resource, TypedFunc};
+use wasmtime::{AsContext, Engine, Store};
 
 mod bindings;
 
@@ -502,17 +502,36 @@ pub fn prepare_plugin(
     PluginPre::new(instance_pre.clone())
 }
 
+pub type HandleIpcMessageFunc = TypedFunc<(String, Vec<u8>), (Result<Vec<u8>, String>,)>;
+
+#[derive(Clone, Copy)]
+pub struct TypedExports {
+    pub handle_ipc_message: HandleIpcMessageFunc,
+}
+
+impl TypedExports {
+    /// # Errors
+    /// Returns an error when an export does not have the signature the host calls it with.
+    pub fn new(store: impl AsContext, plugin: &Plugin) -> wasmtime::Result<Self> {
+        let store = store.as_context();
+        Ok(Self {
+            handle_ipc_message: plugin.func_handle_ipc_message().func().typed(&store)?,
+        })
+    }
+}
+
 pub async fn init_plugin(
     engine: &Engine,
     plugin_pre: PluginPre<PluginHostState>,
     legacy_sync_reentry: &LegacySyncReentry,
-) -> Result<(Plugin, Store<PluginHostState>, PluginMetadata), PluginInitError> {
+) -> Result<(Plugin, TypedExports, Store<PluginHostState>, PluginMetadata), PluginInitError> {
     let mut store = Store::new(engine, PluginHostState::new());
     store.limiter(|state| &mut state.limits);
     let plugin = legacy_sync_reentry
         .scope_bootstrap(plugin_pre.instantiate_async(&mut store))
         .await
         .map_err(PluginInitError::InstantiationFailed)?;
+    let typed_exports = TypedExports::new(&store, &plugin).map_err(PluginInitError::ApiMismatch)?;
 
     store
         .run_concurrent(async |accessor| {
@@ -548,7 +567,7 @@ pub async fn init_plugin(
         .permissions
         .clone_from(&metadata.permissions);
 
-    Ok((plugin, store, metadata))
+    Ok((plugin, typed_exports, store, metadata))
 }
 
 #[cfg(test)]

@@ -5,9 +5,7 @@ use pumpkin_util::text::{
     color::{Color, NamedColor},
 };
 
-use crate::pumpkin::plugin::command::{
-    CommandError as CommandErrorWit, CommandSender, CommandSuggestions, SuggestionRequest,
-};
+use crate::pumpkin::plugin::command::{CommandError as CommandErrorWit, SuggestionRequest};
 use pumpkin_core::{
     command::{
         context::command_context::CommandContext,
@@ -24,7 +22,6 @@ use pumpkin_wasm_host_common::{
     args::build_consumed_args_from_context, commands::block_on_callback, plugin::WasmPlugin,
     state::PluginHostState,
 };
-use wasmtime::component::Resource;
 
 fn map_command_result(
     state: &mut PluginHostState,
@@ -140,10 +137,10 @@ impl SuggestionProvider for WasmCommandSuggestionProvider {
             remaining: builder.remaining().to_string(),
         };
         let handler_id = self.handler_id;
-        let function = {
-            let plugin = self.plugin.instance::<crate::Plugin>();
-            *plugin.func_handle_command_suggestion().func()
-        };
+        let function = self
+            .plugin
+            .typed_exports::<crate::TypedExports>()
+            .map(|exports| exports.handle_command_suggestion);
 
         let runtime = self.server.runtime.clone();
         block_on_callback(&runtime, async {
@@ -152,6 +149,7 @@ impl SuggestionProvider for WasmCommandSuggestionProvider {
                 .store
                 .call_guest(move |mut guest| {
                     Box::pin(async move {
+                        let function = function?;
                         let (sender_resource, server_resource) = guest.with(|mut store| {
                             let sender_resource = store.data_mut().add(sender)?;
                             let server_resource = match store.data_mut().add(server) {
@@ -164,12 +162,7 @@ impl SuggestionProvider for WasmCommandSuggestionProvider {
                             Ok::<_, wasmtime::Error>((sender_resource, server_resource))
                         })?;
                         let response = guest
-                            .call_func::<(
-                                u32,
-                                Resource<CommandSender>,
-                                Resource<crate::pumpkin::plugin::server::Server>,
-                                SuggestionRequest,
-                            ), (CommandSuggestions,)>(
+                            .call(
                                 function,
                                 (handler_id, sender_resource, server_resource, request),
                             )

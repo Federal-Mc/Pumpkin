@@ -276,11 +276,10 @@ impl WasmPluginEventHandler {
         event: Box<dyn PendingWasmEvent>,
     ) -> wasmtime::Result<Box<dyn Any + Send>> {
         let handler_id = self.handler_id;
-        let function = *self
+        let function = self
             .plugin
-            .instance::<crate::Plugin>()
-            .func_handle_event()
-            .func();
+            .typed_exports::<crate::TypedExports>()?
+            .handle_event;
         self.plugin
             .store
             .call_guest(move |mut guest| {
@@ -298,13 +297,7 @@ impl WasmPluginEventHandler {
                     // Lowering transfers these resources to the guest. Only a
                     // successfully returned event is owned by the host again.
                     let (returned_event,) = guest
-                        .call_func::<(
-                            u32,
-                            Resource<crate::pumpkin::plugin::server::Server>,
-                            WasmEvent,
-                        ), (WasmEvent,)>(
-                            function, (handler_id, server_res, wasm_event)
-                        )
+                        .call(function, (handler_id, server_res, wasm_event))
                         .await?;
                     Ok(guest.with(|mut store| event.from_wasm(returned_event, store.data_mut())))
                 })
