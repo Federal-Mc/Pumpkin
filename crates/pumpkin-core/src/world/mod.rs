@@ -24,6 +24,9 @@ use std::{
 };
 use tracing::{debug, error, info, trace, warn};
 
+const PLAYERS_PER_TASK: usize = 8;
+const LIGHT_ITEMS_PER_TASK: usize = 256;
+
 mod active_chunks;
 pub mod brightness;
 pub mod chunker;
@@ -1750,12 +1753,18 @@ impl World {
 
         let t_players = std::time::Instant::now();
         // Vanilla handles all packets before any player ticks
-        players.par_iter().for_each(|player| {
-            player.process_inbound_packets();
-        });
-        players.par_iter().for_each(|player| {
-            player.tick(server);
-        });
+        players
+            .par_iter()
+            .with_min_len(PLAYERS_PER_TASK)
+            .for_each(|player| {
+                player.process_inbound_packets();
+            });
+        players
+            .par_iter()
+            .with_min_len(PLAYERS_PER_TASK)
+            .for_each(|player| {
+                player.tick(server);
+            });
         // Vanilla `ServerPlayer.pushEntities`: one player after another, not while frozen
         if server.tick_rate_manager.runs_normally() {
             for player in players.iter() {
@@ -1781,6 +1790,7 @@ impl World {
         let t_entities = std::time::Instant::now();
         let tickable: Vec<_> = entities_to_tick
             .par_iter()
+            .with_min_len(LIGHT_ITEMS_PER_TASK)
             .filter_map(|entity| {
                 if entity.get_entity().is_decor_frozen() {
                     return None;
@@ -1809,6 +1819,7 @@ impl World {
             let islands = (|| {
                 let reports: Vec<_> = tickable
                     .par_iter()
+                    .with_min_len(LIGHT_ITEMS_PER_TASK)
                     .map(|(entity, _)| {
                         entity_islands::EntityReach::of(entity.as_ref(), islands_config)
                     })
@@ -1893,11 +1904,14 @@ impl World {
             order::set_entity_order(None);
         }
         // Vanilla `rideTick`: riders follow their vehicle's seat once it has moved
-        tickable.par_iter().for_each(|(entity, _)| {
-            if !entity.is_passenger() && entity.get_entity().has_passengers() {
-                crate::entity::ride_tick_riders(entity.as_ref());
-            }
-        });
+        tickable
+            .par_iter()
+            .with_min_len(LIGHT_ITEMS_PER_TASK)
+            .for_each(|(entity, _)| {
+                if !entity.is_passenger() && entity.get_entity().has_passengers() {
+                    crate::entity::ride_tick_riders(entity.as_ref());
+                }
+            });
         self.order_tick_spawns();
         let entity_elapsed = t_entities.elapsed();
 
@@ -1915,11 +1929,14 @@ impl World {
         let block_entity_count = block_entities.len();
 
         let t_be = std::time::Instant::now();
-        block_entities.par_chunks(16).for_each(|batch| {
-            for be in batch {
-                be.tick(self);
-            }
-        });
+        block_entities
+            .par_chunks(16)
+            .with_min_len(4)
+            .for_each(|batch| {
+                for be in batch {
+                    be.tick(self);
+                }
+            });
         // Drained after all ticks, so changes (hopper -> chest) land in the same tick.
         self.flush_comparator_updates(&block_entities);
         let block_entity_elapsed = t_be.elapsed();
@@ -2283,6 +2300,7 @@ impl World {
         tick_data
             .block_ticks
             .par_chunks(BATCH_SIZE)
+            .with_min_len(4)
             .for_each(|batch| {
                 let world = world.clone();
                 for scheduled_tick in batch {
@@ -2303,6 +2321,7 @@ impl World {
         tick_data
             .fluid_ticks
             .par_chunks(BATCH_SIZE)
+            .with_min_len(4)
             .for_each(|batch| {
                 let world = world.clone();
                 for scheduled_tick in batch {
@@ -2319,6 +2338,7 @@ impl World {
         tick_data
             .random_ticks
             .par_chunks(BATCH_SIZE)
+            .with_min_len(4)
             .for_each(|batch| {
                 let world = world.clone();
                 for scheduled_tick in batch {

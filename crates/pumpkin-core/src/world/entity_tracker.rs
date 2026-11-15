@@ -44,6 +44,8 @@ use crate::world::World;
 use crate::world::chunker::get_view_distance;
 use crate::world::decor_store::DecorStore;
 
+const TRACKED_PER_TASK: usize = 32;
+
 /// Vanilla `VecDeltaCodec.encode`: Java `Math.round` on the 1/4096
 fn encode_pos(value: f64) -> i64 {
     (value * 4096.0 + 0.5).floor() as i64
@@ -1488,6 +1490,7 @@ impl EntityTracker {
         let moved_player_ids: FxHashSet<i32> = tracked_entities
             .par_iter()
             .zip(entity_moved.par_iter_mut())
+            .with_min_len(TRACKED_PER_TASK)
             .filter_map(|(tracked, moved_slot)| {
                 if tracked.entity.get_entity().is_decor_frozen() {
                     return None;
@@ -1518,6 +1521,7 @@ impl EntityTracker {
             tracked_entities
                 .par_iter()
                 .zip(entity_moved.par_iter())
+                .with_min_len(TRACKED_PER_TASK)
                 .for_each(|(tracked, &moved)| {
                     if !moved {
                         tracked.update_players_from_snapshots(&moved_snapshots);
@@ -1525,13 +1529,16 @@ impl EntityTracker {
                 });
         }
 
-        tracked_entities.par_iter().for_each(|tracked| {
-            if tracked.entity.get_player().is_none() {
-                tracked.send_changes(world);
-            } else if tracked.entity.get_entity().synched_data.is_dirty() {
-                tracked.entity.get_entity().send_dirty_entity_data();
-            }
-        });
+        tracked_entities
+            .par_iter()
+            .with_min_len(TRACKED_PER_TASK)
+            .for_each(|tracked| {
+                if tracked.entity.get_player().is_none() {
+                    tracked.send_changes(world);
+                } else if tracked.entity.get_entity().synched_data.is_dirty() {
+                    tracked.entity.get_entity().send_dirty_entity_data();
+                }
+            });
     }
 }
 
